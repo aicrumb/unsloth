@@ -1196,10 +1196,15 @@ class FastLlamaModel:
         f' "-____-"     Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}'
         logger.warning(debug_info)
         import subprocess, re, gc
-        output = subprocess.check_output(
-            'nvidia-smi --query-gpu=memory.used --format=csv', shell = True)
-        output = re.findall(rb'([\\d]{1,})[\\s]{1,}M', output)
-        output = sum(int(x.decode('utf-8'))/1024 > 4 for x in output)
+        #output = subprocess.check_output(
+        #    'nvidia-smi --query-gpu=memory.used --format=csv', shell = True)
+        #output = re.findall(rb'([\\d]{1,})[\\s]{1,}M', output)
+        #output = sum(int(x.decode('utf-8'))/1024 > 4 for x in output)
+        import os
+        if 'CUDA_VISIBLE_DEVICES' in os.environ.keys():
+            output = len(os.environ['CUDA_VISIBLE_DEVICES'].replace(",",""))
+        else:
+            raise RuntimeError("Please set CUDA_VISIBLE_DEVICES to the GPU you want to use for training, for example using `os.environ['CUDA_VISIBLE_DEVICES'] = '0'`.")
         if output > 1: raise RuntimeError(
             'Unsloth currently does not work on multi GPU setups - sadly we are a 2 brother team so '\\
             'enabling it will require much more work, so we have to prioritize. Please understand!\\n'\\
