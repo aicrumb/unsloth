@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "2024.7"
+__version__ = "2024.8"
 
 __all__ = [
     "prepare_model_for_kbit_training",
@@ -122,7 +122,8 @@ pass
 # =============================================
 # torch.cuda.amp.custom_fwd is deprecated >= 2.4
 import torch
-if Version(torch.__version__) < Version("2.4.0"):
+torch_version = torch.__version__
+if Version(torch_version) < Version("2.4.0"):
     torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
     torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
 else:
@@ -134,37 +135,47 @@ pass
 # =============================================
 # Get Flash Attention v2 if Ampere (RTX 30xx, A100)
 import bitsandbytes as bnb
-from transformers.models.llama.modeling_llama import logger
 from transformers import AutoTokenizer
+from transformers.utils.import_utils import _is_package_available
 
 major_version, minor_version = torch.cuda.get_device_capability()
 SUPPORTS_BFLOAT16 = False
 
 if major_version >= 8:
     SUPPORTS_BFLOAT16 = True
-    try:
-        from flash_attn import flash_attn_func
+    if _is_package_available("flash_attn"):
         # Check for CUDA linking errors "undefined symbol: _ZNK3c106SymIntltEl"
         try:
             from flash_attn.flash_attn_interface import flash_attn_cuda
             HAS_FLASH_ATTENTION = True
         except:
-            logger.warning_once(
+            print(
                 "Unsloth: Your Flash Attention 2 installation seems to be broken?\n"\
                 "A possible explanation is you have a new CUDA version which isn't\n"\
                 "yet compatible with FA2? Please file a ticket to Unsloth or FA2.\n"\
-                "We shall now use Xformers instead, which gets a 0.01% performance hit.\n"\
+                "We shall now use Xformers instead, which does not have any performance hits!\n"\
                 "We found this negligible impact by benchmarking on 1x A100."
             )
+
+            # Stop Flash Attention from importing!
+            import transformers.utils.import_utils
+            transformers.utils.import_utils.is_flash_attn_2_available = lambda *args, **kwargs: False
+            import transformers.utils
+            transformers.utils.is_flash_attn_2_available = lambda *args, **kwargs: False
+
             HAS_FLASH_ATTENTION = False
-    except:
+        pass
+    else:
         HAS_FLASH_ATTENTION = False
 else:
     # Tri Dao's benchmark shows xformers is faster for now.
     HAS_FLASH_ATTENTION = False
 pass
-import xformers.ops.fmha as xformers
-xformers_attention = xformers.memory_efficient_attention
+
+from transformers.models.llama.modeling_llama import logger
+
+# =============================================
+# Get Xformers
 from xformers import __version__ as xformers_version
 # Temporarily disable 0.0.27 and higher - inference issues
 if Version(xformers_version) >= Version("0.0.27"):
@@ -182,9 +193,41 @@ if Version(xformers_version) >= Version("0.0.27"):
     )
 pass
 
+if   Version(torch_version) < Version("2.2.0") and Version(xformers_version) >= Version("0.0.24"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.24 for torch = {torch_version}."
+    )
+elif Version(torch_version) < Version("2.3.0") and Version(xformers_version) >= Version("0.0.26"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.26 for torch = {torch_version}."
+    )
+elif Version(torch_version) < Version("2.4.0") and Version(xformers_version) >= Version("0.0.27"):
+    raise ImportError(
+        f"Unsloth: You have torch = {torch_version} but xformers = {xformers_version}.\n"\
+        f"Please install xformers < 0.0.27 for torch = {torch_version}."
+    )
+pass
+
+from xformers._cpp_lib import _register_extensions
+try:
+    _register_extensions() # Check if C++ modules are loaded correctly
+except Exception as error:
+    raise ImportError(
+        "Unsloth: Xformers was not installed correctly.\n"\
+        "Please install xformers separately first.\n"\
+        "Then confirm if it's correctly installed by running:\n"\
+        "python -m xformers.info\n\n"
+        "Longer error message:\n" + str(error)
+    )
+pass
+import xformers.ops.fmha as xformers
+xformers_attention = xformers.memory_efficient_attention
+
 # Check TRL version
 from trl import __version__ as trl_version
-if Version(xformers_version) >= Version("0.9.0"):
+if Version(trl_version) >= Version("0.9.0"):
     raise ImportError(
         "Unsloth: If you are in Colab, we updated the top cell install instructions - please change it to below "\
         "then press Disconnect Runtime and then Restart it.\n"\
@@ -198,8 +241,6 @@ if Version(xformers_version) >= Version("0.9.0"):
         'Please downgrade TRL via `pip install --force-reinstall "trl<0.9.0"'
     )
 pass
-
-# =============================================
 
 # =============================================
 # Torch compile settings
@@ -336,7 +377,7 @@ def patch_tokenizer(model, tokenizer):
     possible_reserved_tokens = (
         "<|reserved",                # Llama-3
         "<|placeholder",             # Phi-3
-        "[control",                  # Forgot where lol
+        "[control",                  # Mistral type models
         "<pad>",                     # Mistral Nemo
         "<|finetune_right_pad_id|>", # Llama-3.1
     )
@@ -404,32 +445,35 @@ pass
 # =============================================
 # Weirdly LoraLayer.update_layer downcasts PEFT layers to float16??
 # For mixed precision, we need it to be in float32 not float16.
-from peft.tuners.lora.layer import LoraLayer
-import inspect, re
-try:
-    source = inspect.getsource(LoraLayer.update_layer)
-    text = "if weight is not None:\n"
-    start = source.find(text) + len(text)
-    end = source.find("self.to(weight.device)", start)
-    spaces = re.findall(r"^([ ]{1,})break", source, flags = re.MULTILINE)[0]
-    source = source.replace(source[start : end], spaces)
-    spaces = len(re.match(r"[\s]{1,}", source).group(0))
-    lines = source.split("\n")
-    source = "\n".join(x[spaces:] for x in lines)
-    source = re.sub("([^\.])nn\.", r"\1torch.nn.", source)
-    source = source.replace("def update_layer", "def LoraLayer_update_layer")
-    exec(source, globals())
-
-    # Fix up incorrect downcasting of LoRA weights
+from peft import __version__ as peft_version
+if Version(peft_version) < Version("0.12.0"):
     from peft.tuners.lora.layer import LoraLayer
-    LoraLayer.update_layer = LoraLayer_update_layer
-    from peft.tuners.lora import LoraLayer
-    LoraLayer.update_layer = LoraLayer_update_layer
-except:
-    logger.warning_once(
-        "Unsloth unsuccessfully patched LoraLayer.update_layer. Please file a bug report.\n"\
-        "Luckily, your training run will still work in the meantime!"
-    )
+    import inspect, re
+    try:
+        source = inspect.getsource(LoraLayer.update_layer)
+        text = "if weight is not None:\n"
+        start = source.find(text) + len(text)
+        end = source.find("self.to(weight.device)", start)
+        spaces = re.findall(r"^([ ]{1,})break", source, flags = re.MULTILINE)[0]
+        source = source.replace(source[start : end], spaces)
+        spaces = len(re.match(r"[\s]{1,}", source).group(0))
+        lines = source.split("\n")
+        source = "\n".join(x[spaces:] for x in lines)
+        source = re.sub("([^\.])nn\.", r"\1torch.nn.", source)
+        source = source.replace("def update_layer", "def LoraLayer_update_layer")
+        exec(source, globals())
+
+        # Fix up incorrect downcasting of LoRA weights
+        from peft.tuners.lora.layer import LoraLayer
+        LoraLayer.update_layer = LoraLayer_update_layer
+        from peft.tuners.lora import LoraLayer
+        LoraLayer.update_layer = LoraLayer_update_layer
+    except:
+        logger.warning_once(
+            "Unsloth unsuccessfully patched LoraLayer.update_layer. Please file a bug report.\n"\
+            "Luckily, your training run will still work in the meantime!"
+        )
+    pass
 pass
 # =============================================
 
