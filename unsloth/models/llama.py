@@ -1411,7 +1411,7 @@ class FastLlamaModel:
             else:
                 inner_training_loop = Trainer._original_training_loop
         except:
-            raise RuntimeError('Unsloth currently does not support multi GPU setups - but we are working on it!')
+            print('Unsloth currently does not support multi GPU setups - but we are working on it!')
         pass
 
         # if ((post_check - pre_check) >= 1).sum() > 1:
