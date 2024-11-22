@@ -4,6 +4,7 @@ the speedups are worth it as someone who is regularly working on a machine with 
 
 **installation**
 ```
+pip install unsloth_zoo
 pip install -U git+https://github.com/aicrumb/unsloth
 ```
 
